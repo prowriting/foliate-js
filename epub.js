@@ -741,6 +741,24 @@ class MediaOverlay extends EventTarget {
         }
         return false
     }
+    // Concatenated-timeline offset (seconds) of the clip whose text target
+    // is `#fragment`, or null when nothing matches. Never touches playback.
+    async textOffset(sectionIndex, fragment) {
+        const section = this.book.sections[sectionIndex]
+        if (!section?.mediaOverlay || !fragment) return null
+        const entries = sectionIndex === this.#sectionIndex && this.#entries
+            ? this.#entries : await this.#measureSection(sectionIndex)
+        if (!entries) return null
+        const suffix = '#' + fragment
+        let elapsed = 0
+        for (const entry of entries) {
+            const first = entry.items[0]?.begin ?? 0
+            for (const item of entry.items)
+                if (item.text.endsWith(suffix)) return elapsed + (item.begin - first)
+            elapsed += MediaOverlay.#entrySpan(entry)
+        }
+        return null
+    }
     setVolume(volume) {
         this.#volume = volume
         if (this.#audio) this.#audio.volume = volume
