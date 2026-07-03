@@ -272,30 +272,43 @@ export class View extends HTMLElement {
             const activeClass = book.media.activeClass
             const playbackActiveClass = book.media.playbackActiveClass
             this.mediaOverlay = book.getMediaOverlay()
+            // Consumers may detach the read-along without stopping audio:
+            // highlight = apply the active class; follow = navigate to it.
+            this.mediaOverlayHighlightEnabled = true
+            this.mediaOverlayFollowEnabled = true
             let lastActive
-            this.mediaOverlay.addEventListener('highlight', e => {
-                const resolved = this.resolveNavigation(e.detail.text)
-                this.renderer.goTo(resolved)
-                    .then(() => {
-                        const content = this.renderer.getContents()
-                            .find(x => x.index === resolved.index)
-                        if (!content?.doc) return
-                        const el = resolved.anchor(content.doc)
-                        if (!el?.classList) return
-                        el.classList.add(activeClass)
-                        if (playbackActiveClass) el.ownerDocument
-                            .documentElement.classList.add(playbackActiveClass)
-                        lastActive = new WeakRef(el)
-                    })
-            })
-            this.mediaOverlay.addEventListener('unhighlight', () => {
+            const removeLastActive = () => {
                 const el = lastActive?.deref()
                 if (el) {
                     el.classList.remove(activeClass)
                     if (playbackActiveClass) el.ownerDocument
                         .documentElement.classList.remove(playbackActiveClass)
                 }
+                lastActive = null
+            }
+            const applyActive = resolved => {
+                const content = this.renderer.getContents()
+                    .find(x => x.index === resolved.index)
+                if (!content?.doc) return
+                const el = resolved.anchor(content.doc)
+                if (!el?.classList) return
+                el.classList.add(activeClass)
+                if (playbackActiveClass) el.ownerDocument
+                    .documentElement.classList.add(playbackActiveClass)
+                lastActive = new WeakRef(el)
+            }
+            this.mediaOverlay.addEventListener('highlight', e => {
+                if (!this.mediaOverlayHighlightEnabled) {
+                    removeLastActive()
+                    return
+                }
+                const resolved = this.resolveNavigation(e.detail.text)
+                if (!resolved) return
+                if (this.mediaOverlayFollowEnabled)
+                    this.renderer.goTo(resolved).then(() => applyActive(resolved))
+                else applyActive(resolved)
             })
+            this.mediaOverlay.addEventListener('unhighlight', removeLastActive)
         }
     }
     close() {

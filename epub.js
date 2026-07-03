@@ -715,6 +715,32 @@ class MediaOverlay extends EventTarget {
         }
         return this.startAtOffset(sectionIndex, target)
     }
+    // Play the clip whose SMIL text target is `#fragment` in the given
+    // section (tap-to-seek). Resolves false, with playback untouched, when
+    // nothing matches — no side effects until a match is confirmed.
+    async playFromText(sectionIndex, fragment) {
+        const section = this.book.sections[sectionIndex]
+        if (!section?.mediaOverlay || fragment == null || fragment === '') return false
+        const sameSection = sectionIndex === this.#sectionIndex && this.#entries
+        const entries = sameSection ? this.#entries
+            : await this.#measureSection(sectionIndex)
+        if (!entries) return false
+        const suffix = '#' + fragment
+        for (let i = 0; i < entries.length; i++) {
+            const { items } = entries[i]
+            for (let j = 0; j < items.length; j++) {
+                if (items[j].text.endsWith(suffix)) {
+                    if (!sameSection) {
+                        this.#sectionIndex = sectionIndex
+                        await this.#loadSMIL(section.mediaOverlay)
+                    }
+                    this.#play(i, j).catch(e => this.#error(e))
+                    return true
+                }
+            }
+        }
+        return false
+    }
     setVolume(volume) {
         this.#volume = volume
         if (this.#audio) this.#audio.volume = volume
