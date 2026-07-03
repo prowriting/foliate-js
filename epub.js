@@ -317,6 +317,18 @@ const getMetadata = opf => {
             media[camel(key.replace(PREFIX.media, ''))] = one(val)
     }
     if (media.duration) media.duration = parseClock(media.duration)
+    // per-resource media:duration refinements, keyed by the refined id
+    media.durations = {}
+    for (const [refinesKey, metaEls] of refines) {
+        if (!refinesKey) continue
+        for (const el of metaEls) {
+            const property = getPropertyURL(el.getAttribute('property'), prefixes)
+                ?? el.getAttribute('property')
+            if (property === PREFIX.media + 'duration')
+                media.durations[refinesKey.replace(/^#/, '')] =
+                    parseClock(getElementText(el))
+        }
+    }
     return { metadata, rendition, media }
 }
 
@@ -441,14 +453,10 @@ class MediaOverlay extends EventTarget {
         this.book = book
         this.loadXML = loadXML
     }
-    async #loadSMIL(item) {
-        if (this.#lastMediaOverlayItem === item) return
-        const doc = await this.loadXML(item.href)
-        const resolve = href => href ? resolveURL(href, item.href) : null
+    static #parseSMILEntries(doc, itemHref) {
+        const resolve = href => href ? resolveURL(href, itemHref) : null
         const { $, $$$ } = childGetter(doc, NS.SMIL)
-        this.#audioIndex = -1
-        this.#itemIndex = -1
-        this.#entries = $$$(doc, 'par').reduce((arr, $par) => {
+        return $$$(doc, 'par').reduce((arr, $par) => {
             const text = resolve($($par, 'text')?.getAttribute('src'))
             const $audio = $($par, 'audio')
             if (!text || !$audio) return arr
@@ -460,7 +468,67 @@ class MediaOverlay extends EventTarget {
             else arr.push({ src, items: [{ text, begin, end }] })
             return arr
         }, [])
+    }
+    async #loadSMIL(item) {
+        if (this.#lastMediaOverlayItem === item) return
+        const doc = await this.loadXML(item.href)
+        this.#audioIndex = -1
+        this.#itemIndex = -1
+        this.#entries = MediaOverlay.#parseSMILEntries(doc, item.href)
         this.#lastMediaOverlayItem = item
+    }
+    // The per-section audio timeline concatenates each audio file's clip span
+    // ([first clipBegin, last clipEnd)) in SMIL order, so positions stay
+    // meaningful even when files restart their clip clocks at zero.
+    static #entrySpan(entry) {
+        const first = entry.items[0], last = entry.items.at(-1)
+        return first && last ? Math.max(0, last.end - first.begin) : 0
+    }
+    static #entriesDuration(entries) {
+        return entries.reduce((sum, entry) => sum + MediaOverlay.#entrySpan(entry), 0)
+    }
+    static #locate(entries, offset) {
+        let elapsed = 0
+        for (let i = 0; i < entries.length; i++) {
+            const span = MediaOverlay.#entrySpan(entries[i])
+            if (offset < elapsed + span) {
+                const items = entries[i].items
+                const first = items[0]?.begin ?? 0
+                const audioTime = first + Math.max(0, offset - elapsed)
+                let itemIndex = 0
+                while (items[itemIndex + 1]?.begin <= audioTime) itemIndex++
+                return { audioIndex: i, itemIndex, audioTime }
+            }
+            elapsed += span
+        }
+        return null
+    }
+    // SMIL entries for sections other than the playing one, for duration
+    // measures during seeks; keyed by href so repeated seeks stay cheap.
+    #measured = new Map()
+    async #measureSection(index) {
+        const item = this.book.sections[index]?.mediaOverlay
+        if (!item) return null
+        if (this.#measured.has(item.href)) return this.#measured.get(item.href)
+        const entries = MediaOverlay.#parseSMILEntries(await this.loadXML(item.href), item.href)
+        this.#measured.set(item.href, entries)
+        return entries
+    }
+    async #sectionDurationAt(index) {
+        const section = this.book.sections[index]
+        if (!section?.mediaOverlay) return null
+        if (index === this.#sectionIndex && this.#entries)
+            return MediaOverlay.#entriesDuration(this.#entries)
+        if (typeof section.mediaOverlayDuration === 'number')
+            return section.mediaOverlayDuration
+        const entries = await this.#measureSection(index)
+        return entries ? MediaOverlay.#entriesDuration(entries) : null
+    }
+    #adjacentOverlaySection(from, step) {
+        const { sections } = this.book
+        for (let i = from + step; i >= 0 && i < sections.length; i += step)
+            if (sections[i]?.mediaOverlay) return i
+        return null
     }
     get #activeAudio() {
         return this.#entries[this.#audioIndex]
@@ -478,7 +546,7 @@ class MediaOverlay extends EventTarget {
     #unhighlight() {
         this.dispatchEvent(new CustomEvent('unhighlight', { detail: this.#activeItem }))
     }
-    async #play(audioIndex, itemIndex) {
+    async #play(audioIndex, itemIndex, seekTime) {
         this.#stop()
         this.#audioIndex = audioIndex
         this.#itemIndex = itemIndex
@@ -516,12 +584,12 @@ class MediaOverlay extends EventTarget {
         })
         if (this.#state === 'paused') {
             this.#highlight()
-            audio.currentTime = this.#activeItem.begin ?? 0
+            audio.currentTime = seekTime ?? this.#activeItem.begin ?? 0
         }
         else audio.addEventListener('canplaythrough', () => {
             // for some reason need to seek in `canplaythrough`
             // or it won't play when skipping in WebKit
-            audio.currentTime = this.#activeItem.begin ?? 0
+            audio.currentTime = seekTime ?? this.#activeItem.begin ?? 0
             this.#state = 'playing'
             audio.play().catch(e => this.#error(e))
         }, { once: true })
@@ -530,7 +598,11 @@ class MediaOverlay extends EventTarget {
         this.#audio?.pause()
         const section = this.book.sections[sectionIndex]
         const href = section?.id
-        if (!href) return
+        if (!href) {
+            // Ran past the last section: the book's audio is finished.
+            this.dispatchEvent(new CustomEvent('ended'))
+            return
+        }
 
         const { mediaOverlay } = section
         if (!mediaOverlay) return this.start(sectionIndex + 1)
@@ -574,6 +646,74 @@ class MediaOverlay extends EventTarget {
     }
     next() {
         this.#play(this.#audioIndex, this.#itemIndex + 1)
+    }
+    get activeSectionIndex() {
+        return this.#sectionIndex
+    }
+    get audioTime() {
+        return this.#audio?.currentTime ?? this.#activeItem?.begin ?? 0
+    }
+    get sectionOffset() {
+        if (!this.#entries?.length || this.#audioIndex < 0) return 0
+        let elapsed = 0
+        for (let i = 0; i < this.#audioIndex; i++)
+            elapsed += MediaOverlay.#entrySpan(this.#entries[i])
+        const first = this.#entries[this.#audioIndex]?.items?.[0]?.begin ?? 0
+        return elapsed + Math.max(0, this.audioTime - first)
+    }
+    get sectionDuration() {
+        return this.#entries ? MediaOverlay.#entriesDuration(this.#entries) : 0
+    }
+    async startAtOffset(sectionIndex, offset) {
+        this.#audio?.pause()
+        const section = this.book.sections[sectionIndex]
+        if (!section?.id) {
+            this.dispatchEvent(new CustomEvent('ended'))
+            return
+        }
+        if (!section.mediaOverlay) return this.start(sectionIndex)
+        this.#sectionIndex = sectionIndex
+        await this.#loadSMIL(section.mediaOverlay)
+        const total = MediaOverlay.#entriesDuration(this.#entries)
+        const clamped = Math.max(0, Math.min(offset ?? 0, Math.max(0, total - .05)))
+        const located = MediaOverlay.#locate(this.#entries, clamped)
+        if (!located) return this.start(sectionIndex)
+        return this.#play(located.audioIndex, located.itemIndex, located.audioTime)
+            .catch(e => this.#error(e))
+    }
+    async seekRelative(seconds) {
+        if (this.#sectionIndex < 0 || !this.#entries) return
+        let sectionIndex = this.#sectionIndex
+        let target = this.sectionOffset + seconds
+        while (target < 0) {
+            const prev = this.#adjacentOverlaySection(sectionIndex, -1)
+            if (prev == null) {
+                target = 0
+                break
+            }
+            sectionIndex = prev
+            target += await this.#sectionDurationAt(sectionIndex) ?? 0
+        }
+        let duration = await this.#sectionDurationAt(sectionIndex) ?? 0
+        while (target >= duration) {
+            const next = this.#adjacentOverlaySection(sectionIndex, 1)
+            if (next == null) return this.start(this.book.sections.length)
+            target -= duration
+            sectionIndex = next
+            duration = await this.#sectionDurationAt(sectionIndex) ?? 0
+        }
+        if (sectionIndex === this.#sectionIndex) {
+            const located = MediaOverlay.#locate(this.#entries, target)
+            if (located && located.audioIndex === this.#audioIndex && this.#audio) {
+                // Same audio file: seek the live element instead of recreating
+                // it, avoiding a currentTime=0 flash from new Audio().
+                this.#itemIndex = located.itemIndex
+                this.#audio.currentTime = located.audioTime
+                this.#highlight()
+                return
+            }
+        }
+        return this.startAtOffset(sectionIndex, target)
     }
     setVolume(volume) {
         this.#volume = volume
@@ -1169,6 +1309,11 @@ ${doc.querySelector('parsererror').innerText}`)
         this.metadata = metadata
         this.rendition = rendition
         this.media = media
+        for (const section of this.sections) {
+            const overlayId = section.mediaOverlay?.id
+            const duration = overlayId != null ? media.durations?.[overlayId] : null
+            if (duration != null) section.mediaOverlayDuration = duration
+        }
         this.dir = this.resources.pageProgressionDirection
         const displayOptions = getDisplayOptions(
             await this.#loadXML('META-INF/com.apple.ibooks.display-options.xml')

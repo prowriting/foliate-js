@@ -277,9 +277,11 @@ export class View extends HTMLElement {
                 const resolved = this.resolveNavigation(e.detail.text)
                 this.renderer.goTo(resolved)
                     .then(() => {
-                        const { doc } = this.renderer.getContents()
-                            .find(x => x.index = resolved.index)
-                        const el = resolved.anchor(doc)
+                        const content = this.renderer.getContents()
+                            .find(x => x.index === resolved.index)
+                        if (!content?.doc) return
+                        const el = resolved.anchor(content.doc)
+                        if (!el?.classList) return
                         el.classList.add(activeClass)
                         if (playbackActiveClass) el.ownerDocument
                             .documentElement.classList.add(playbackActiveClass)
