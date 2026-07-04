@@ -292,6 +292,11 @@ export class View extends HTMLElement {
                 if (!content?.doc) return
                 const el = resolved.anchor(content.doc)
                 if (!el?.classList) return
+                // At most one active element, no matter how highlight and
+                // unhighlight events interleave: with follow enabled this runs
+                // async after goTo(), so a pair of in-flight highlights could
+                // otherwise both land and strand the earlier element.
+                removeLastActive()
                 el.classList.add(activeClass)
                 if (playbackActiveClass) el.ownerDocument
                     .documentElement.classList.add(playbackActiveClass)

@@ -711,7 +711,10 @@ class MediaOverlay extends EventTarget {
             const located = MediaOverlay.#locate(this.#entries, target)
             if (located && located.audioIndex === this.#audioIndex && this.#audio) {
                 // Same audio file: seek the live element instead of recreating
-                // it, avoiding a currentTime=0 flash from new Audio().
+                // it, avoiding a currentTime=0 flash from new Audio(). Pair the
+                // new highlight with an unhighlight of the item we leave, as
+                // every other path does — consumers clear the old element on it.
+                this.#unhighlight()
                 this.#itemIndex = located.itemIndex
                 this.#audio.currentTime = located.audioTime
                 this.#highlight()
