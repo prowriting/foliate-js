@@ -582,10 +582,15 @@ class MediaOverlay extends EventTarget {
             this.#audio = null
             this.#play(audioIndex + 1, 0).catch(e => this.#error(e))
         })
-        if (this.#state === 'paused') {
+        if (this.#state === 'paused') audio.addEventListener('loadedmetadata', () => {
+            // Seek only once metadata is available — earlier assignments are
+            // deferred by the element while `currentTime` still reads 0.
+            // Highlight after the seek, so listeners that sync UI position on
+            // highlight observe the target offset, not the file start.
+            if (this.#audio !== audio) return
+            audio.currentTime = seekTime ?? this.#activeItem?.begin ?? 0
             this.#highlight()
-            audio.currentTime = seekTime ?? this.#activeItem.begin ?? 0
-        }
+        }, { once: true })
         else audio.addEventListener('canplaythrough', () => {
             // for some reason need to seek in `canplaythrough`
             // or it won't play when skipping in WebKit
