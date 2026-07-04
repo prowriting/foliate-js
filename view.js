@@ -286,12 +286,33 @@ export class View extends HTMLElement {
                 }
                 lastActive = null
             }
-            const applyActive = resolved => {
+            const activeElement = resolved => {
                 const content = this.renderer.getContents()
                     .find(x => x.index === resolved.index)
-                if (!content?.doc) return
+                if (!content?.doc) return null
                 const el = resolved.anchor(content.doc)
-                if (!el?.classList) return
+                return el?.classList ? el : null
+            }
+            // Whether the element is on the visible page right now: its first
+            // line's center mapped through its iframe into top coordinates.
+            // Off-screen prerendered views are translated out of the viewport
+            // or visibility-hidden, so they fail this test.
+            const isOnScreen = el => {
+                if (!el) return false
+                const frame = el.ownerDocument.defaultView?.frameElement
+                if (!frame) return false
+                const frameWin = frame.ownerDocument.defaultView
+                if (frameWin.getComputedStyle(frame).visibility === 'hidden') return false
+                const rect = el.getClientRects?.()[0] ?? el.getBoundingClientRect()
+                if (!rect || (!rect.width && !rect.height)) return false
+                const frameRect = frame.getBoundingClientRect()
+                const cx = frameRect.x + rect.x + rect.width / 2
+                const cy = frameRect.y + rect.y + rect.height / 2
+                return cx >= 0 && cx <= frameWin.innerWidth
+                    && cy >= 0 && cy <= frameWin.innerHeight
+            }
+            const applyActive = (resolved, el = activeElement(resolved)) => {
+                if (!el) return
                 // At most one active element, no matter how highlight and
                 // unhighlight events interleave: with follow enabled this runs
                 // async after goTo(), so a pair of in-flight highlights could
@@ -302,18 +323,38 @@ export class View extends HTMLElement {
                     .documentElement.classList.add(playbackActiveClass)
                 lastActive = new WeakRef(el)
             }
+            let lastHighlightTarget = null
             this.mediaOverlay.addEventListener('highlight', e => {
                 if (!this.mediaOverlayHighlightEnabled) {
                     removeLastActive()
                     return
                 }
+                lastHighlightTarget = e.detail.text
                 const resolved = this.resolveNavigation(e.detail.text)
                 if (!resolved) return
-                if (this.mediaOverlayFollowEnabled)
+                const el = activeElement(resolved)
+                // Follow navigates only when the target is off-screen: a goTo
+                // to already-visible text realigns dual-page spreads around
+                // the anchor, visibly yanking the reader (e.g. tap-to-seek on
+                // a chapter's first paragraph pulling the previous chapter's
+                // tail into the spread).
+                if (this.mediaOverlayFollowEnabled && !isOnScreen(el))
                     this.renderer.goTo(resolved).then(() => applyActive(resolved))
-                else applyActive(resolved)
+                else applyActive(resolved, el)
             })
-            this.mediaOverlay.addEventListener('unhighlight', removeLastActive)
+            this.mediaOverlay.addEventListener('unhighlight', () => {
+                lastHighlightTarget = null
+                removeLastActive()
+            })
+            // Section views can be destroyed and re-created while navigation
+            // settles (prerender churn), taking the active class with them.
+            // Once things reland, re-resolve and repaint the current item.
+            this.addEventListener('relocate', () => {
+                if (!this.mediaOverlayHighlightEnabled || lastHighlightTarget == null) return
+                if (lastActive?.deref()?.isConnected) return
+                const resolved = this.resolveNavigation(lastHighlightTarget)
+                if (resolved) applyActive(resolved)
+            })
         }
     }
     close() {
