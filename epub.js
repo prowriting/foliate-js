@@ -767,6 +767,50 @@ class MediaOverlay extends EventTarget {
         }
         return null
     }
+    /**
+     * Export the already-parsed EPUB Media Overlay timeline for native
+     * playback surfaces such as Android Auto and CarPlay. Sources remain EPUB
+     * entry paths; callers can materialize each one with loadAudioSource().
+     */
+    async exportPlaybackManifest() {
+        const sections = []
+        for (let sectionIndex = 0; sectionIndex < this.book.sections.length; sectionIndex++) {
+            const entries = await this.#measureSection(sectionIndex)
+            if (!entries?.length) continue
+            sections.push({
+                sectionIndex,
+                duration: MediaOverlay.#entriesDuration(entries),
+                segments: entries.map(entry => {
+                    const first = entry.items[0]
+                    const last = entry.items.at(-1)
+                    const clipBegin = first?.begin ?? 0
+                    return {
+                        source: entry.src,
+                        clipBegin,
+                        clipEnd: last?.end ?? clipBegin,
+                        cues: entry.items.map(item => ({
+                            offset: Math.max(0, item.begin - clipBegin),
+                            text: item.text,
+                        })),
+                    }
+                }),
+            })
+        }
+        return { sections }
+    }
+    async loadAudioSource(source) {
+        const blob = await this.book.loadBlob(source)
+        if (blob.type) return blob
+        const extension = source.toLowerCase().split('.').pop()
+        const type = extension === 'mp3' ? 'audio/mpeg'
+            : extension === 'm4a' || extension === 'mp4' ? 'audio/mp4'
+            : extension === 'ogg' || extension === 'oga' ? 'audio/ogg'
+            : extension === 'opus' ? 'audio/opus'
+            : extension === 'wav' ? 'audio/wav'
+            : extension === 'aac' ? 'audio/aac'
+            : ''
+        return type ? new Blob([blob], { type }) : blob
+    }
     setVolume(volume) {
         this.#volume = volume
         if (this.#audio) this.#audio.volume = volume

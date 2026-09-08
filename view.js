@@ -308,8 +308,9 @@ export class View extends HTMLElement {
                 const frameRect = frame.getBoundingClientRect()
                 const cx = frameRect.x + rect.x + rect.width / 2
                 const cy = frameRect.y + rect.y + rect.height / 2
-                return cx >= 0 && cx <= frameWin.innerWidth
-                    && cy >= 0 && cy <= frameWin.innerHeight
+                const viewport = this.renderer.getBoundingClientRect()
+                return cx >= viewport.left && cx <= viewport.right
+                    && cy >= viewport.top && cy <= viewport.bottom
             }
             const applyActive = (resolved, el = activeElement(resolved)) => {
                 if (!el) return
